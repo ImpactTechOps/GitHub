@@ -1,0 +1,53 @@
+name: Mirror to Azure DevOps
+
+on:
+  push:
+    branches: ['**']   # mirror all branches
+    tags: ['**']       # mirror all tags
+  delete:              # propagate branch/tag deletes
+  workflow_dispatch:   # manual run option
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # required for --mirror (all refs & tags)
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-mirror-bot"
+          git config user.email "github-mirror-bot@users.noreply.github.com"
+          git config http.sslVerify true
+
+      - name: Add ADO remote (with PAT in URL)
+        env:
+          ADO_URL: ${{ secrets.ADO_URL }}
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+        run: |
+          if [ -z "$ADO_URL" ] || [ -z "$ADO_PAT" ]; then
+            echo "::error title=Missing secrets::ADO_URL and/or ADO_PAT are not set"
+            exit 1
+          fi
+          # Inject username:PAT for HTTPS auth (username can be any non-empty string)
+          ADO_REMOTE="${ADO_URL/https:\/\//https:\/\/ado-mirror:${ADO_PAT}@}"
+          git remote add ado "$ADO_REMOTE" || git remote set-url ado "$ADO_REMOTE"
+          git remote -v
+
+      - name: Verify ADO connectivity (lists remote heads)
+        run: |
+          set -x
+          git ls-remote --heads ado
+
+      - name: Mirror all refs (branches, tags, deletions)
+        run: |
+          set -e
+          # Exact mirror (force-updates + prunes deletions). Requires force-push permission.
+          git push ado --mirror
+
+          # If branch policies block force updates, use the safer alternative below INSTEAD:
+          # git push ado --all --prune --force
+          # git push ado --tags --prune --force
