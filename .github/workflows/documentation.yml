@@ -1,0 +1,100 @@
+name: Automated Documentation Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - '**/*.js'
+      - '**/*.ts'
+      - '**/*.py'
+      - '**/*.java'
+      - '**/*.go'
+      - '**/*.rs'
+      - '**/*.ps1'
+      - '**/*.sh'
+      - '**/*.cpp'
+      - '**/*.cs'
+      - '**/*.yml'
+      - '**/*.yaml'
+      
+  pull_request:
+    branches: [main]
+
+  workflow_dispatch:
+    inputs:
+      doc_type:
+        description: 'Type of documentation to generate'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - api
+          - code-comments
+          - readme
+
+env:
+  AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+  AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+  AZURE_OPENAI_DEPLOYMENT: ${{ secrets.AZURE_OPENAI_DEPLOYMENT }}
+
+jobs:
+  generate-documentation:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install dependencies
+        run: |
+          npm install openai
+          npm install @octokit/rest
+          npm install glob
+      
+      - name: Generate documentation
+        id: generate
+        run: node .github/scripts/generate-docs.js
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOC_TYPE: ${{ github.event.inputs.doc_type || 'all' }}
+      
+      - name: Commit documentation changes
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add Documentation/ README.md || true
+          git diff --staged --quiet || git commit -m "docs: auto-generated documentation [skip ci]"
+      
+      - name: Push changes
+        if: github.event_name != 'pull_request'
+        uses: ad-m/github-push-action@master
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ github.ref }}
+      
+      - name: Create PR comment with documentation
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const summary = fs.existsSync('Documentation/SUMMARY.md') 
+              ? fs.readFileSync('Documentation/SUMMARY.md', 'utf8')
+              : 'Documentation generated successfully!';
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 📚 Documentation Generated\n\n${summary}`

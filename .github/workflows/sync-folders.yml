@@ -1,0 +1,120 @@
+name: Sync Folders to All Repos
+
+on:
+  workflow_dispatch:  # Manual trigger
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/**'
+      - 'ADO Pipeline/**'
+
+jobs:
+  sync-folders:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get list of target repos
+        id: get-repos
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OWNER="${{ github.repository_owner }}"
+          REPOS=$(gh repo list $OWNER --limit 1000 --json name -q '.[].name' | grep -v "GitHub-Test-Repository")
+          echo "repos<<EOF" >> $GITHUB_OUTPUT
+          echo "$REPOS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Sync to each repo
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          OWNER="${{ github.repository_owner }}"
+          BRANCH="main"  # Change to "master" if needed
+          
+          REPOS="${{ steps.get-repos.outputs.repos }}"
+          
+          for repo in $REPOS; do
+            echo "================================================"
+            echo "Processing: $repo"
+            echo "================================================"
+            
+            # Clone target repo
+            git clone "https://x-access-token:${GH_TOKEN}@github.com/${OWNER}/${repo}.git" target-repo
+            cd target-repo
+            
+            # Copy folders (only files that don't exist)
+            rsync -av --ignore-existing ../.github ./ 2>/dev/null || true
+            rsync -av --ignore-existing "../ADO Pipeline" ./ 2>/dev/null || true
+            
+            # Check if there are changes
+            if [[ -n $(git status -s) ]]; then
+              echo "Changes detected, committing..."
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git add .
+              git commit -m "Sync .github and ADO Pipeline folders from GitHub-Test-Repository"
+              git push
+              echo "✓ Successfully updated $repo"
+            else
+              echo "No changes needed for $repo"
+            fi
+            
+            cd ..
+            rm -rf target-repo
+            echo ""
+          done
+
+      - name: Summary
+        run: |
+          echo "================================================"
+          echo "Sync complete!"
+          echo "================================================"
+
+      - name: Trigger Documentation workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Triggering documentation workflow..."
+          gh workflow run documentation.yml --ref main
+
+      - name: Wait for documentation to complete
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Waiting for documentation workflow to complete..."
+          sleep 10
+          
+          # Get the latest run ID for documentation workflow
+          RUN_ID=$(gh run list --workflow=documentation.yml --limit 1 --json databaseId -q '.[0].databaseId')
+          
+          if [ -n "$RUN_ID" ]; then
+            echo "Monitoring run ID: $RUN_ID"
+            gh run watch $RUN_ID
+          else
+            echo "Could not find documentation workflow run"
+          fi
+
+      - name: Trigger ADO Mirror workflows
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          OWNER="${{ github.repository_owner }}"
+          REPOS="${{ steps.get-repos.outputs.repos }}"
+          
+          echo "Triggering ADO mirror workflows..."
+          
+          for repo in $REPOS; do
+            echo "Triggering mirror for: $repo"
+            gh workflow run mirror-to-ado.yml \
+              --repo "${OWNER}/${repo}" \
+              --ref main 2>/dev/null || echo "  No mirror workflow in $repo or already running"
+            sleep 2
+          done
+          
+          echo "All mirror workflows triggered!"
